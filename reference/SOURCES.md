@@ -26,3 +26,10 @@ Only the small CPU-compatible harness wheels are stored here. GPU libraries and 
 ## Validation boundary
 
 `scripts/validate_official.py` uses the real official compiler, schema, competition limits and tool factories. It compiles the declared agent tree without invoking tools or calling a model. No tool outcomes, inference, patch quality, GPU compatibility or Kaggle score are simulated. Those require evaluation on Kaggle with the official notebook/runtime.
+
+## Google runtime packages used for CPU compilation
+
+- `google_adk-1.36.1-py3-none-any.whl` from the same official wheelhouse URL pattern above; SHA-256 `1a2f6868c509e3151fb0de3575a7d18b45c338be86f420924dad74e7193631a0`.
+- `google_genai-2.11.0-py3-none-any.whl` from the same official wheelhouse URL pattern above; SHA-256 `5bc8186100e1d34d691fbe0cba392b7e04e98d286ca952323a6672d054accf95`.
+
+Other dependencies are resolved from the package registry. The local CPU environment is not identical to Kaggle GPU scoring.

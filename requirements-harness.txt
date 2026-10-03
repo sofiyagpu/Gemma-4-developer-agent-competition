@@ -1,0 +1,7 @@
+# Official CPU compilation environment (Python 3.12).
+# These files are from the competition's public wheelhouse; see reference/SOURCES.md.
+https://www.kaggle.com/api/v1/datasets/download/metric/gemma-4-developer-agent-wheelhouse/google_adk-1.36.1-py3-none-any.whl
+https://www.kaggle.com/api/v1/datasets/download/metric/gemma-4-developer-agent-wheelhouse/google_genai-2.11.0-py3-none-any.whl
+./reference/wheels/adk_submission-0.2.12-py3-none-any.whl
+./reference/wheels/adk_eval_core-0.1.0-py3-none-any.whl
+./reference/wheels/swegemma-0.2.7-py3-none-any.whl

@@ -79,7 +79,14 @@ layout = validate_directory(AGENT_DIR, limits)
 parsed = load_yaml(layout.config_path, layout.root_dir, limits=limits)
 SandboxedAgentConfig.model_validate(parsed)
 declared_model = validate_single_declared_model(AGENT_DIR)
-print('Official directory/schema checks passed:', declared_model)
+compile_models = ModelRegistry()
+compile_models.register(declared_model, declared_model)
+compiled = compile_submission(
+    submission_dir=AGENT_DIR, tool_registry=create_tools(ctx=None),
+    model_registry=compile_models, limits=limits,
+    generation_constraints=gen_constraints,
+)
+print('Official CPU compilation passed:', compiled.name, declared_model)
 print('GPU evaluation enabled:', RUN_EVALUATION)
 """)
     add("markdown", """## Optional real evaluation
