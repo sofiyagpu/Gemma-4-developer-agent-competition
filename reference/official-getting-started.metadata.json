@@ -1,0 +1,16 @@
+{
+  "ref": "ryanholbrook/getting-started-gemma-4-developer-agent",
+  "title": "Getting Started - Gemma 4 Developer Agent",
+  "author": "Ryan Holbrook",
+  "lastRunTime": "2026-09-30T15:27:10.2483497Z",
+  "currentVersionNumber": 2,
+  "datasetDataSources": [
+    "metric/gemma-4-developer-agent-wheelhouse"
+  ],
+  "competitionDataSources": [
+    "gemma-4-developer-agent"
+  ],
+  "modelDataSources": [
+    "google/gemma-4/Other/gemma-4-31b-it-qat-w4a16-ct/2"
+  ]
+}
