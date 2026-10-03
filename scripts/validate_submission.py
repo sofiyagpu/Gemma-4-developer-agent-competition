@@ -169,8 +169,9 @@ class _Resolver:
 
         def include(loader: Loader, node: Any) -> Any:
             _require(isinstance(node, yaml.ScalarNode), f"!include needs one path: {name}")
-            target = loader.construct_scalar(node)
-            # The competition compiler resolves includes relative to the submission root.
+            target = _safe_relative_path(loader.construct_scalar(node))
+            # Match the official loader: relative to the including file's directory.
+            target = (PurePosixPath(name).parent / target).as_posix()
             return resolver.load(target, (*stack, name))
 
         Loader.add_constructor("!include", include)

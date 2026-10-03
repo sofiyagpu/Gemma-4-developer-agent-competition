@@ -155,7 +155,7 @@ class SubmissionTests(unittest.TestCase):
     def test_reject_include_cycle(self):
         with (self.root / "agent.yaml").open("a") as handle:
             handle.write("global_instruction: !include configs/cycle.yaml\n")
-        (self.root / "configs/cycle.yaml").write_text("!include agent.yaml\n")
+        (self.root / "configs/cycle.yaml").write_text("!include cycle.yaml\n")
         self.assert_invalid("Include cycle")
 
     def test_reject_include_depth(self):
@@ -163,9 +163,17 @@ class SubmissionTests(unittest.TestCase):
             handle.write("global_instruction: !include configs/chain0.yaml\n")
         for index in range(12):
             (self.root / f"configs/chain{index}.yaml").write_text(
-                f"!include configs/chain{index + 1}.yaml\n" if index < 11 else "done\n"
+                f"!include chain{index + 1}.yaml\n" if index < 11 else "done\n"
             )
         self.assert_invalid("Include depth")
+
+    def test_nested_include_uses_including_directory(self):
+        self.write_included_submission()
+        generation = (self.root / "configs/generation.yaml").read_text()
+        (self.root / "configs/generation.yaml").write_text("!include actual.yaml\n")
+        (self.root / "configs/actual.yaml").write_text(generation)
+        checked = validate_submission(self.root)
+        self.assertEqual(checked.agent["generate_content_config"]["max_output_tokens"], 6144)
 
     def test_reject_duplicate_yaml_keys(self):
         with (self.root / "agent.yaml").open("a") as handle:
