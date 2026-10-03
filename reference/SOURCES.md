@@ -21,7 +21,7 @@ Retrieved 2026-10-03 from the public Kaggle API. These are development reference
 - `adk_submission-0.2.12-py3-none-any.whl`: SHA-256 `077c438c426e625b9f722081694e1d32856e6f7e932ef625002fc4a11aabdc10`
 - `swegemma-0.2.7-py3-none-any.whl`: SHA-256 `27a2f60f8db46c8fef5defc16df722dac0402446c9a6252e7e6b4c280e843c81`
 
-Only the small CPU-compatible harness wheels are stored here. GPU libraries and Gemma weights are not included.
+Wheel binaries are excluded from Git. `requirements-harness.txt` downloads these official packages and verifies their SHA-256 hashes. GPU libraries and Gemma weights are not vendored.
 
 ## Validation boundary
 

@@ -1,0 +1,41 @@
+name: Validate and build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - name: Install development dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+      - name: Validate and build
+        run: |
+          python scripts/validate_submission.py
+          python scripts/package_submission.py
+          python scripts/build_notebook.py
+      - name: Check generated notebook
+        run: git diff --exit-code -- notebooks/kaggle_evaluate.ipynb
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: gemma-agent-submission
+          path: |
+            dist/submission.zip
+            dist/submission.manifest.json
+            notebooks/kaggle_evaluate.ipynb
+          if-no-files-found: error

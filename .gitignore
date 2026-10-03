@@ -14,3 +14,12 @@ results/
 .env.*
 !.env.example
 kaggle.json
+
+# Local tools, downloaded packages and notebook checkpoints
+.vscode/
+.idea/
+.ipynb_checkpoints/
+*.whl
+*.egg-info/
+.coverage
+htmlcov/
