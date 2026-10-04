@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Build a self-contained Kaggle evaluation notebook from the packaged entry."""
+"""Build a self-contained Kaggle notebook for paired public evaluation."""
 from __future__ import annotations
 
+import argparse
 import base64
 import hashlib
 import json
@@ -10,11 +11,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def main() -> None:
-    archive = ROOT / "dist/submission.zip"
-    payload = archive.read_bytes()
-    digest = hashlib.sha256(payload).hexdigest()
+def build_notebook(archive: Path, baseline: Path | None, output: Path) -> None:
+    archives = {"candidate": archive}
+    if baseline is not None:
+        archives = {"baseline": baseline, **archives}
+    entries = {name: {"sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                      "base64": base64.b64encode(path.read_bytes()).decode()}
+               for name, path in archives.items()}
     starter = json.loads((ROOT / "reference/official-getting-started.ipynb").read_text())
+    helper_source = (ROOT / "scripts/public_eval.py").read_text()
     cells = []
 
     def add(kind: str, source: str) -> None:
@@ -23,28 +28,36 @@ def main() -> None:
             cell.update(execution_count=None, outputs=[])
         cells.append(cell)
 
-    add("markdown", """# Gemma 4: focused repository repair
+    add("markdown", """# Gemma 4: paired baseline/candidate evaluation
 
-This notebook reconstructs the exact submission archive, checks it with the official
-harness, and optionally evaluates public development tasks. It does not submit to Kaggle.
-No performance results are claimed until the evaluation cells have actually run.
+This notebook restores the exact agent archives, compiles them with the official harness,
+and optionally compares them on the **same public tasks**. It does not submit to Kaggle.
+The baseline is the preserved entry reported as 0.10 by its author. The candidate's
+leaderboard score is unknown; a public development result does not establish a hidden score.
 
 Attach the **Gemma 4 Developer Agent competition**, the latest
 **metric/gemma-4-developer-agent-wheelhouse** dataset, and
 **google/gemma-4/other/gemma-4-31b-it-qat-w4a16-ct/2** model.
-For evaluation choose **GPU L4 x4** and **Internet off**. Start a fresh session after
-changing the wheelhouse. The default stops after CPU compilation; enable evaluation below.
+For evaluation choose **GPU L4 x4**, **Internet off**, and start a fresh session after
+changing the wheelhouse. By default only CPU compilation runs.
 
-Runtime setup and evaluation are adapted from [Ryan Holbrook's official starter,
+Runtime installation and model serving are adapted from [Ryan Holbrook's official starter,
 version 2](https://www.kaggle.com/code/ryanholbrook/getting-started-gemma-4-developer-agent).
-The prompt and agent configuration in this archive are original to this entry.
 """)
-    add("code", """RUN_EVALUATION = False  # Set True to use the GPU and run real public tasks.
-TASK_IDS = []  # Empty selects one deterministic task per repository (up to four).
+    add("code", f"""RUN_EVALUATION = False  # Enable only to run real tasks on the GPU.
+RUN_VARIANTS = {list(archives)!r}
+RUN_LABEL = 'paired-v2'  # New label for changed archives, tasks or evaluation settings.
+TASK_IDS = []  # Explicit IDs reproduce a previous panel exactly.
+TASK_COUNT = 8  # Diagnostic smoke panel; increase for broader evidence.
+SELECTION_SEED = 20261004
+EXCLUDE_TASK_IDS = []  # Previously tuned-on IDs; exclude for a fresh holdout panel.
+MAX_RUN_MINUTES = 180  # Stop before the next pair; in-flight tasks can exceed this.
+TASK_TIME_CAP_MINUTES = None  # None preserves each archive's real task budget.
+# A numeric cap is a cheaper smoke protocol, not an evaluation of the actual archive budgets.
 """)
     add("markdown", "## Install the official offline runtime")
     add("code", "".join(starter["cells"][2]["source"]))
-    add("markdown", "## Restore the exact entry and validate its hash")
+    add("markdown", "## Restore and compile both exact archives")
     add("code", f'''import base64
 import hashlib
 import io
@@ -52,20 +65,27 @@ import json
 import tempfile
 import zipfile
 
-ARCHIVE_SHA256 = {digest!r}
-archive_bytes = base64.b64decode({base64.b64encode(payload).decode()!r})
-assert hashlib.sha256(archive_bytes).hexdigest() == ARCHIVE_SHA256
+ARCHIVES = {entries!r}
 WORKING_DIR = Path('/kaggle/working')
 WORKING_DIR.mkdir(parents=True, exist_ok=True)
-ZIP_PATH = WORKING_DIR / 'submission.zip'
-ZIP_PATH.write_bytes(archive_bytes)
-AGENT_DIR = Path(tempfile.mkdtemp(prefix='repair-agent-', dir=WORKING_DIR))
-with zipfile.ZipFile(io.BytesIO(archive_bytes)) as zf:
-    assert 'agent.yaml' in zf.namelist()
-    for name in zf.namelist():
-        assert not Path(name).is_absolute() and '..' not in Path(name).parts
-    zf.extractall(AGENT_DIR)
-print('Submission:', ZIP_PATH, 'SHA-256:', ARCHIVE_SHA256)
+VARIANTS = {{}}
+assert RUN_VARIANTS and len(set(RUN_VARIANTS)) == len(RUN_VARIANTS)
+for name in RUN_VARIANTS:
+    entry = ARCHIVES[name]
+    payload = base64.b64decode(entry['base64'])
+    assert hashlib.sha256(payload).hexdigest() == entry['sha256']
+    archive_name = 'submission.zip' if name == 'candidate' else 'submission-baseline-0.10.zip'
+    (WORKING_DIR / archive_name).write_bytes(payload)
+    directory = Path(tempfile.mkdtemp(prefix=f'{{name}}-', dir=WORKING_DIR))
+    with zipfile.ZipFile(io.BytesIO(payload)) as zf:
+        assert 'agent.yaml' in zf.namelist()
+        for item in zf.infolist():
+            assert not Path(item.filename).is_absolute() and '..' not in Path(item.filename).parts
+            assert (item.external_attr >> 16) & 0o170000 != 0o120000, 'Archive contains symlink'
+        zf.extractall(directory)
+    VARIANTS[name] = {{'directory': directory, 'sha256': entry['sha256']}}
+    print(name, entry['sha256'])
+AGENT_DIR = VARIANTS.get('candidate', next(iter(VARIANTS.values())))['directory']
 ''')
     add("code", """from adk_submission import ModelRegistry, compile_submission, validate_directory
 from adk_submission.schema import SandboxedAgentConfig
@@ -75,82 +95,129 @@ from swegemma.models.discovery import validate_single_declared_model
 from swegemma.tools import create_tools
 
 limits, gen_constraints = build_submission_limits()
-layout = validate_directory(AGENT_DIR, limits)
-parsed = load_yaml(layout.config_path, layout.root_dir, limits=limits)
-SandboxedAgentConfig.model_validate(parsed)
-declared_model = validate_single_declared_model(AGENT_DIR)
-compile_models = ModelRegistry()
-compile_models.register(declared_model, declared_model)
-compiled = compile_submission(
-    submission_dir=AGENT_DIR, tool_registry=create_tools(ctx=None),
-    model_registry=compile_models, limits=limits,
-    generation_constraints=gen_constraints,
-)
-print('Official CPU compilation passed:', compiled.name, declared_model)
+declared_models = set()
+for name, variant in VARIANTS.items():
+    directory = variant['directory']
+    layout = validate_directory(directory, limits)
+    parsed = load_yaml(layout.config_path, layout.root_dir, limits=limits)
+    SandboxedAgentConfig.model_validate(parsed)
+    declared_model = validate_single_declared_model(directory)
+    declared_models.add(declared_model)
+    compile_models = ModelRegistry()
+    compile_models.register(declared_model, declared_model)
+    compiled = compile_submission(
+        submission_dir=directory, tool_registry=create_tools(ctx=None),
+        model_registry=compile_models, limits=limits,
+        generation_constraints=gen_constraints,
+    )
+    print('Official CPU compilation passed:', name, compiled.name, declared_model)
+assert len(declared_models) == 1, 'Paired archives must use the same competition base model'
+# This comparison reuses one model server. The preserved baseline has no adapters.
+if 'baseline' in VARIANTS and 'candidate' in VARIANTS:
+    baseline_adapters = VARIANTS['baseline']['directory'] / 'adapters'
+    assert not baseline_adapters.exists(), 'Baseline adapters require separate model serving'
 print('GPU evaluation enabled:', RUN_EVALUATION)
 """)
-    add("markdown", """## Optional real evaluation
+    add("markdown", """## Public evaluation helpers
 
-This uses only the supplied public development tasks. The reference patches are available
-to the verifier; they are not copied into the agent prompt or submission. A four-task
-smoke run is diagnostic and does not estimate the hidden leaderboard reliably.
+Selection is seeded and stratified by repository, approximately in proportion to its
+public task count. It never reads reference solutions or verification outcomes. The
+panel and archive hashes are saved. A small panel can diagnose broken tools and empty
+patches; it cannot reliably distinguish leaderboard scores of 0.10 and 0.13.
+
+Each task gets a fresh harness sandbox. We alternate archive order and preserve archive
+budgets. Every outcome, patch, error, test output and official trace path is saved before
+starting the next task. Rerunning with the same label resumes completed tasks; changed
+inputs/settings require a new label. Retrying failed tasks also requires a new label.
 """)
-    add("code", """if RUN_EVALUATION:
+    add("code", helper_source)
+    add("code", f"""HELPER_SHA256 = {hashlib.sha256(helper_source.encode()).hexdigest()!r}
+if RUN_EVALUATION:
     from swegemma.models import load_tasks
+    from swegemma.deduplication import resolve_task_snapshot_paths
     DATA_DIR = Path('/kaggle/input/competitions/gemma-4-developer-agent')
     TASKS_PATH = DATA_DIR / 'tasks.jsonl'
     tasks = load_tasks(TASKS_PATH)
-    GRAPH_DIR = str(DATA_DIR / 'graphs')
-    EMBEDDINGS_DIR = str(DATA_DIR / 'embeddings')
-    if TASK_IDS:
-        by_id = {task.instance_id: task for task in tasks}
-        unknown = set(TASK_IDS) - by_id.keys()
-        if unknown:
-            raise ValueError(f'Unknown task IDs: {sorted(unknown)}')
-        selected_tasks = [by_id[key] for key in TASK_IDS]
-    else:
-        by_repo = {}
-        for task in sorted(tasks, key=lambda task: task.instance_id):
-            by_repo.setdefault(task.repo, task)
-        selected_tasks = [by_repo[key] for key in sorted(by_repo)][:4]
-    print('Selected:', [task.instance_id for task in selected_tasks])
+    selected_tasks = select_tasks(tasks, TASK_COUNT, SELECTION_SEED, TASK_IDS, EXCLUDE_TASK_IDS)
+    assert RUN_LABEL and Path(RUN_LABEL).name == RUN_LABEL and RUN_LABEL not in ('.', '..')
+    RESULTS_DIR = WORKING_DIR / 'public-evaluation' / RUN_LABEL
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    selection = {{'seed': SELECTION_SEED, 'pool_count': len(tasks),
+                 'excluded_ids': list(EXCLUDE_TASK_IDS),
+                 'task_file_sha256': hashlib.sha256(TASKS_PATH.read_bytes()).hexdigest(),
+                 'helper_sha256': HELPER_SHA256,
+                 'selected': [{{'id': task.instance_id, 'repo': task.repo}} for task in selected_tasks]}}
+    print(json.dumps(selection, indent=2))
+    # Fail before model startup if public verification would be impossible.
+    missing_tests = [task.instance_id for task in selected_tasks
+                     if not (task.test_patch or task.FAIL_TO_PASS or task.PASS_TO_PASS)]
+    missing_snapshots = [task.instance_id for task in selected_tasks
+                        if not resolve_task_snapshot_paths(DATA_DIR / 'snapshots', task.instance_id, task.repo)[0].exists()]
+    if missing_tests or missing_snapshots:
+        raise RuntimeError(f'Public evaluation inputs missing: test specifications={{missing_tests}}, '
+                           f'snapshots={{missing_snapshots}}. No GPU evaluation started; '
+                           'attach the public development data with test specifications.')
+    selection_path = RESULTS_DIR / 'selection.json'
+    if selection_path.exists() and json.loads(selection_path.read_text()) != selection:
+        raise ValueError('Selection/helper changed: choose a new RUN_LABEL.')
+    write_json(selection_path, selection)
 """)
     server = "".join(starter["cells"][8]["source"])
     server = server.replace("gpu_memory_utilization=0.90", "gpu_memory_utilization=0.80")
-    server = server.replace("gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 1", "gpu_count = torch.cuda.device_count()\nassert gpu_count == 4, 'Select GPU L4 x4 for the competition model'")
-    add("code", "server_instance = None\nif RUN_EVALUATION:\n" + "".join("    " + line + "\n" for line in server.splitlines()))
-    evaluate = "".join(starter["cells"][10]["source"])
-    evaluate = evaluate.replace("SAMPLE_TASKS = tasks[:2]", "SAMPLE_TASKS = selected_tasks")
-    evaluate = evaluate.replace("compaction_interval=15", "compaction_interval=5")
-    evaluate = evaluate.replace("predictions = []", "predictions = []\nmetrics = []")
-    evaluate = evaluate.replace("    predictions.append(", "    metrics.append({'id': task.instance_id, 'repo': task.repo, 'resolved': result.resolved,\n                    'test_exit_code': result.test_exit_code, 'duration_seconds': result.duration_seconds,\n                    'tool_calls': result.tool_calls, 'patch_chars': len(result.agent_patch or '')})\n    predictions.append(")
-    evaluate += """
-metrics_df = pd.DataFrame(metrics)
-display(metrics_df)
-summary = {'archive_sha256': ARCHIVE_SHA256, 'task_count': len(metrics),
-           'resolved_count': sum(bool(row['resolved']) for row in metrics),
-           'resolution_rate': sum(bool(row['resolved']) for row in metrics) / len(metrics),
-           'tasks': metrics}
-(WORKING_DIR / 'development-summary.json').write_text(json.dumps(summary, indent=2))
-submission_df.to_json(WORKING_DIR / 'development-patches.jsonl', orient='records', lines=True)
+    server = server.replace("gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 1",
+                            "gpu_count = torch.cuda.device_count()\nassert gpu_count == 4, 'Select GPU L4 x4 for the competition model'")
+    evaluate = """summary, records = evaluate_variants(
+    selected_tasks=selected_tasks, variants=VARIANTS, models=models, adapters=adapters,
+    data_dir=DATA_DIR, output_dir=RESULTS_DIR,
+    task_file_sha256=selection['task_file_sha256'], seed=SELECTION_SEED,
+    max_run_minutes=MAX_RUN_MINUTES, task_time_cap_minutes=TASK_TIME_CAP_MINUTES,
+)
+import pandas as pd
+columns = ['variant', 'id', 'resolved', 'failure_category', 'test_exit_code',
+           'duration_seconds', 'tool_calls', 'total_llm_calls', 'error_message']
+display(pd.DataFrame(records).reindex(columns=columns))
 print(json.dumps(summary, indent=2))
+print('Full artifacts:', RESULTS_DIR)
 """
-    add("code", "if RUN_EVALUATION:\n    try:\n" + "".join("        " + line + "\n" for line in evaluate.splitlines()) + "    finally:\n        if server_instance is not None:\n            server_instance.stop()\n")
-    add("markdown", """## Submission artifact
+    add("code", "server_instance = None\nif RUN_EVALUATION:\n    try:\n"
+        + "".join("        " + line + "\n" for line in (server + "\n\n" + evaluate).splitlines())
+        + "    finally:\n        if server_instance is not None:\n            server_instance.stop()\n")
+    add("markdown", """## Read the comparison and download the candidate
 
-Download `/kaggle/working/submission.zip`. It is the agent package, not the development
-patches JSONL. Upload it to the competition's **Submit Prediction → File Upload** panel.
-The local development summary is not a Kaggle score. Retain the SHA-256 when comparing runs.
+`public-evaluation/<RUN_LABEL>/development-summary.json` reports both resolution rates,
+descriptive Wilson intervals, paired wins/regressions, a paired bootstrap interval and
+an exact discordance test. Infrastructure errors remain in the denominator and are
+identified separately in the saved records. Inspect regressions and traces before
+changing the prompt; then test on fresh IDs by filling `EXCLUDE_TASK_IDS`.
+
+The time allowance only prevents starting another pair. Agent task time excludes some
+setup/verification overhead; `timeout_seconds` is a **command** timeout. Plan GPU time
+accordingly. More public tasks and fresh holdout results are stronger evidence than a
+small tuned panel, but only a competition submission establishes a leaderboard score.
+
+Download `/kaggle/working/submission.zip` for the **candidate agent**, then upload it via
+**Submit Prediction → File Upload**. The baseline ZIP and development records are for
+comparison. Retain `selection.json`, `run-manifest.json` and the result directory to
+reproduce the comparison. This notebook never submits automatically.
 """)
     notebook = {"cells": cells, "metadata": {"kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"}, "language_info": {"name": "python", "version": "3.12"}}, "nbformat": 4, "nbformat_minor": 5}
     for index, cell in enumerate(cells):
         cell["id"] = f"repair-{index:02d}"
         if cell["cell_type"] == "code":
             compile("".join(cell["source"]), f"cell-{index}", "exec")
-    output = ROOT / "notebooks/kaggle_evaluate.ipynb"
-    output.parent.mkdir(exist_ok=True)
+    output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(notebook, indent=2) + "\n")
-    print(f"Created {output} with archive SHA-256 {digest}")
+    print(f"Created {output}; embedded archives: " + ", ".join(f"{key}={value['sha256']}" for key, value in entries.items()))
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--archive", type=Path, default=ROOT / "dist/submission.zip")
+    parser.add_argument("--baseline", type=Path, default=ROOT / "dist/submission-baseline-0.10.zip")
+    parser.add_argument("--candidate-only", action="store_true")
+    parser.add_argument("--output", type=Path, default=ROOT / "notebooks/kaggle_evaluate.ipynb")
+    args = parser.parse_args()
+    build_notebook(args.archive, None if args.candidate_only else args.baseline, args.output)
 
 
 if __name__ == "__main__":

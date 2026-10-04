@@ -27,9 +27,9 @@ It does not run the model or submit to Kaggle.
 
 One agent shares context across localization, editing, and testing. This avoids paying additional model turns for obligatory delegation on straightforward issues. Optional graph navigation uses real symbol names because the offline similarity tool resolves existing graph embeddings rather than embedding natural-language queries. Current source files take precedence over graph snippets.
 
-The initial budget is five minutes per task, 80 counted calls, 100 turns, and 45 seconds per command. With roughly 120 hidden tasks, five minutes per task allows ten hours of agent time if evaluated serially; setup and other overhead still have to fit the competition's twelve-hour cap. This is an initial setting, not a measured runtime guarantee. The prompt reserves time for diff review and explicit submission.
+The budget is five minutes per task, 80 counted calls, 100 turns, and 90 seconds per command. The previous entry used a 45-second command timeout. Increasing the command timeout allows a focused test more time to finish without increasing the whole session's time limit. At 120 tasks, five minutes per task would allow ten hours of agent time if evaluated serially; setup and other overhead still have to fit the competition's twelve-hour cap. The hidden task count and scoring concurrency have not been independently verified. This is a planning bound, not a measured runtime guarantee.
 
-Generation uses temperature 0.2, top-p 0.95, 6,144 maximum output tokens, and a 1,024-token thinking budget. LoRA adapters are optional under the competition rules and are not included here. These settings need empirical comparison before any performance claim.
+Generation uses temperature 0.2, top-p 0.95, 8,192 maximum output tokens, and a 2,048-token thinking budget. The previous entry used 6,144 and 1,024 tokens respectively. The official compiler forwards the reasoning budget to vLLM's `thinking_token_budget`; the output allowance also needs to leave room in the 32,768-token context. The shorter prompt starts with issue-specific inspection, makes a supported source edit early, and matches the official verifier's pytest collection options. These are unmeasured optimization hypotheses, not a claim of a higher score. LoRA adapters are not included.
 
 ## Official compilation and real evaluation
 

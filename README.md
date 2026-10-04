@@ -16,6 +16,12 @@ python scripts/package_submission.py
 
 Upload `dist/submission.zip` to Kaggle.
 
+The previous entry with a user-reported score of **0.10** is preserved in
+[`experiments/baseline-010/`](experiments/baseline-010/). The current candidate
+has a shorter repair prompt, a larger reasoning budget and longer command timeout.
+**Its leaderboard score has not been measured.** Use the evaluation notebook to
+compare both entries on the same public tasks before concluding it improved.
+
 ## Development
 
 ```sh

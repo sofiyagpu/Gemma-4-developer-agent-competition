@@ -1,0 +1,16 @@
+agent_class: LlmAgent
+name: repair_agent
+model: gemma-4-31b-it-qat-w4a16-ct
+description: Diagnose, repair, and verify the reported repository behavior with a focused source patch.
+instruction: !include prompts/system.md
+generate_content_config: !include configs/generation.yaml
+tools:
+  - run_command
+  - read_file
+  - edit_file
+  - write_file
+  - get_code_neighbors
+  - search_similar_code
+  - get_code_subgraph
+  - get_status
+  - submit_patch
