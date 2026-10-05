@@ -8,6 +8,11 @@ import hashlib
 import json
 from pathlib import Path
 
+try:
+    from .package_submission import package_submission
+except ImportError:
+    from package_submission import package_submission
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -15,9 +20,14 @@ def build_notebook(archive: Path, baseline: Path | None, output: Path) -> None:
     archives = {"candidate": archive}
     if baseline is not None:
         archives = {"baseline": baseline, **archives}
-    entries = {name: {"sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-                      "base64": base64.b64encode(path.read_bytes()).decode()}
-               for name, path in archives.items()}
+    entries = {}
+    for name, path in archives.items():
+        payload = path.read_bytes()
+        digest = hashlib.sha256(payload).hexdigest()
+        manifest = path.with_suffix('.manifest.json')
+        if manifest.exists() and json.loads(manifest.read_text())["archive"]["sha256"] != digest:
+            raise ValueError(f"Archive does not match its manifest: {path}. Rebuild it before embedding.")
+        entries[name] = {"sha256": digest, "base64": base64.b64encode(payload).decode()}
     starter = json.loads((ROOT / "reference/official-getting-started.ipynb").read_text())
     helper_source = (ROOT / "scripts/public_eval.py").read_text()
     cells = []
@@ -56,17 +66,34 @@ TASK_TIME_CAP_MINUTES = None  # None preserves each archive's real task budget.
 # A numeric cap is a cheaper smoke protocol, not an evaluation of the actual archive budgets.
 """)
     add("markdown", "## Install the official offline runtime")
-    add("code", "".join(starter["cells"][2]["source"]))
+    install = "".join(starter["cells"][2]["source"])
+    install = install.replace(
+        "WHEELHOUSE_DIR = Path('/kaggle/input/datasets/metric/gemma-4-developer-agent-wheelhouse')",
+        """wheelhouse_candidates = [
+    Path('/kaggle/input/datasets/metric/gemma-4-developer-agent-wheelhouse'),
+    Path('/kaggle/input/gemma-4-developer-agent-wheelhouse'),
+]
+WHEELHOUSE_DIR = next((p for p in wheelhouse_candidates if any(p.glob('*.whl'))), None)
+if WHEELHOUSE_DIR is None:
+    raise FileNotFoundError('Attach metric/gemma-4-developer-agent-wheelhouse as notebook input. '
+                            'No wheel files were found in either supported Kaggle mount.')""")
+    # A fresh directory avoids stale wheel versions after a dataset update.
+    install = install.replace("import sys\n", "import sys\nimport tempfile\n")
+    install = install.replace("tmp_whl = Path('/tmp/wheelhouse')", "tmp_whl = Path(tempfile.mkdtemp(prefix='gemma-wheelhouse-'))")
+    add("code", install)
+    cells[-1]["metadata"]["tags"] = ["kaggle-runtime-install"]
     add("markdown", "## Restore and compile both exact archives")
     add("code", f'''import base64
 import hashlib
 import io
 import json
+import os
 import tempfile
 import zipfile
+from pathlib import Path
 
 ARCHIVES = {entries!r}
-WORKING_DIR = Path('/kaggle/working')
+WORKING_DIR = Path(os.environ.get('GEMMA_WORKING_DIR', '/kaggle/working'))
 WORKING_DIR.mkdir(parents=True, exist_ok=True)
 VARIANTS = {{}}
 assert RUN_VARIANTS and len(set(RUN_VARIANTS)) == len(RUN_VARIANTS)
@@ -212,12 +239,20 @@ reproduce the comparison. This notebook never submits automatically.
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--archive", type=Path, default=ROOT / "dist/submission.zip")
-    parser.add_argument("--baseline", type=Path, default=ROOT / "dist/submission-baseline-0.10.zip")
+    parser.add_argument("--archive", type=Path, help="Use an existing candidate ZIP instead of rebuilding submission/.")
+    parser.add_argument("--baseline", type=Path, help="Use an existing baseline ZIP instead of rebuilding the preserved source.")
     parser.add_argument("--candidate-only", action="store_true")
     parser.add_argument("--output", type=Path, default=ROOT / "notebooks/kaggle_evaluate.ipynb")
     args = parser.parse_args()
-    build_notebook(args.archive, None if args.candidate_only else args.baseline, args.output)
+    archive = args.archive or ROOT / "dist/submission.zip"
+    if args.archive is None:
+        package_submission(ROOT / "submission", archive)
+    baseline = None
+    if not args.candidate_only:
+        baseline = args.baseline or ROOT / "dist/submission-baseline-0.10.zip"
+        if args.baseline is None:
+            package_submission(ROOT / "experiments/baseline-010", baseline)
+    build_notebook(archive, baseline, args.output)
 
 
 if __name__ == "__main__":
