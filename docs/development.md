@@ -6,17 +6,19 @@ Run commands from the repository root. Local packaging needs Python 3.9+ and
 ## Build artifacts
 
 ```sh
-python scripts/validate_submission.py
-python scripts/package_submission.py
 python scripts/build_notebook.py
 ```
 
 - `dist/submission.zip` — competition entry, with `agent.yaml` at the archive root.
 - `dist/submission.manifest.json` — archive and source file SHA-256 hashes.
+- `dist/submission-baseline-0.10.zip` — preserved comparison entry, rebuilt from its source.
 - `notebooks/kaggle_evaluate.ipynb` — notebook embedding that exact archive.
 
-After changing `submission/`, rebuild both the ZIP and notebook. Commit the updated
-notebook with the source changes. The ZIP uses fixed timestamps, permissions and
+This one command validates and rebuilds both ZIPs from source before embedding them
+in the notebook, including on a clean checkout with no `dist/` directory. It avoids
+embedding an older archive after changing `submission/`. Explicit `--archive` or
+`--baseline` arguments use existing ZIPs and check their manifest hashes when present.
+Commit the updated notebook with the source changes. The ZIP uses fixed timestamps, permissions and
 entry ordering so identical source files produce identical bytes.
 
 GitHub Actions runs package tests, validates the entry, rebuilds the notebook,
@@ -39,13 +41,40 @@ Generation uses temperature 0.2, top-p 0.95, 8,192 maximum output tokens, and a 
 python3.12 -m venv .compile-venv
 .compile-venv/bin/python -m pip install -r requirements-harness.txt
 .compile-venv/bin/python scripts/validate_official.py --report dist/official-validation.json
+.compile-venv/bin/python scripts/smoke_notebook.py --report dist/notebook-smoke.json
 ```
 
 The exact official package sources are recorded in [source provenance](../reference/SOURCES.md). Install those packages and their dependencies in a Python 3.12 environment, or use the notebook with Kaggle's latest official wheelhouse. A successful CPU compile does not prove GPU serving or task resolution.
 
-To run real public development tasks, import `notebooks/kaggle_evaluate.ipynb` into Kaggle, attach the competition dataset, the latest `metric/gemma-4-developer-agent-wheelhouse`, and Google's competition model version 2. Select **GPU L4 x4**, turn **Internet off**, and set `RUN_EVALUATION = True`. By default it selects one deterministic task from each of up to four repositories. Set `TASK_IDS` for a fixed comparison set. It writes `development-summary.json`, development patches, and the official evaluator's results. Four tasks are a smoke test, not a reliable hidden-score estimate.
+To run real public development tasks, import `notebooks/kaggle_evaluate.ipynb` into Kaggle, attach the competition dataset, the latest `metric/gemma-4-developer-agent-wheelhouse`, and Google's competition model version 2. Select **GPU L4 x4**, turn **Internet off**, and set `RUN_EVALUATION = True`. By default it selects eight seeded, repository-stratified public tasks and runs both baseline and candidate. Set `TASK_IDS` for a fixed comparison set, or `EXCLUDE_TASK_IDS` for a fresh holdout. Eight tasks are diagnostic, not enough to establish a three-percentage-point improvement.
 
-The notebook defaults to compilation only so an ordinary Run All does not silently consume GPU evaluation time. Its cells have been syntax-checked locally; GPU execution is a separate validation step.
+Each archive keeps its own agent budgets. Public verification uses the same 300-second
+command timeout for both variants so the candidate's longer agent command timeout does
+not also buy it extra grading time. This is a recorded development setting, not a claim
+about the private scorer. The runner uses public task specifications and snapshots;
+automatic secret-bundle discovery is disabled. Missing public inputs are reported before
+GPU startup instead of silently producing zero scores.
+
+Results, patches, errors and trace paths are saved after each task under
+`/kaggle/working/public-evaluation/<RUN_LABEL>/`. The run manifest records archive hashes,
+task selection, package versions and evaluation settings. Reusing the same label resumes
+completed tasks; changed inputs or a retry after a runtime exception require a new label.
+`MAX_RUN_MINUTES` stops scheduling new task pairs; setup and in-flight work can run longer.
+
+The notebook defaults to compilation only so an ordinary Run All does not silently consume GPU evaluation time. The CPU smoke script actually executes these cells with installed official packages in a temporary working directory. It skips Kaggle's wheel installer, does not start a model server, and does not measure patch quality. GPU execution is a separate validation step.
+
+## Investigating a notebook exception
+
+First distinguish a failure of the development notebook from a failure of Kaggle's
+private scoring notebook after uploading the ZIP. They are different executions.
+The generic **Notebook threw exception** status alone does not identify the cause.
+
+For the development notebook, inspect the failing cell and
+`/kaggle/working/runtime-error.txt` for server/evaluation errors; task-level unexpected
+exceptions also retain full tracebacks in `records/*.json`. Check the attached inputs
+and start a fresh session after updating the wheelhouse. For a ZIP scoring failure,
+retain the uploaded archive's SHA-256 and the submission traceback or error details.
+Local compilation cannot diagnose a private GPU/OOM/environment failure without that log.
 
 ## Submission
 

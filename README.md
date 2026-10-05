@@ -11,7 +11,7 @@ Python 3.9+.
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements-dev.txt
-python scripts/package_submission.py
+python scripts/build_notebook.py
 ```
 
 Upload `dist/submission.zip` to Kaggle.

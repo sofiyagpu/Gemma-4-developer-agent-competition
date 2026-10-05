@@ -84,6 +84,9 @@ async def _inspect_runtime(agent) -> dict:
 
 
 def validate(root: Path) -> dict:
+    # macOS temporary paths start at /var, a symlink to /private/var. Match
+    # validate_directory's canonical root when loading eval_config directly.
+    root = root.resolve()
     # LiteLLM may otherwise fetch its model-cost map during import. This check
     # uses installed metadata only and never needs a network connection.
     os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
