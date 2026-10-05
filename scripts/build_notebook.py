@@ -56,13 +56,14 @@ version 2](https://www.kaggle.com/code/ryanholbrook/getting-started-gemma-4-deve
 """)
     add("code", f"""RUN_EVALUATION = False  # Enable only to run real tasks on the GPU.
 RUN_VARIANTS = {list(archives)!r}
-RUN_LABEL = 'paired-v2'  # New label for changed archives, tasks or evaluation settings.
+RUN_LABEL = 'paired-v3'  # New label for changed archives, tasks or evaluation settings.
 TASK_IDS = []  # Explicit IDs reproduce a previous panel exactly.
 TASK_COUNT = 8  # Diagnostic smoke panel; increase for broader evidence.
 SELECTION_SEED = 20261004
 EXCLUDE_TASK_IDS = []  # Previously tuned-on IDs; exclude for a fresh holdout panel.
 MAX_RUN_MINUTES = 180  # Stop before the next pair; in-flight tasks can exceed this.
 TASK_TIME_CAP_MINUTES = None  # None preserves each archive's real task budget.
+VERIFICATION_TIMEOUT_SECONDS = 300  # Identical public grading allowance for both archives.
 # A numeric cap is a cheaper smoke protocol, not an evaluation of the actual archive budgets.
 """)
     add("markdown", "## Install the official offline runtime")
@@ -163,7 +164,11 @@ if RUN_EVALUATION:
     from swegemma.models import load_tasks
     from swegemma.deduplication import resolve_task_snapshot_paths
     DATA_DIR = Path('/kaggle/input/competitions/gemma-4-developer-agent')
+    if not (DATA_DIR / 'tasks.jsonl').is_file():
+        DATA_DIR = Path('/kaggle/input/gemma-4-developer-agent')
     TASKS_PATH = DATA_DIR / 'tasks.jsonl'
+    if not TASKS_PATH.is_file():
+        raise FileNotFoundError('Attach the Gemma 4 Developer Agent competition data; tasks.jsonl is missing.')
     tasks = load_tasks(TASKS_PATH)
     selected_tasks = select_tasks(tasks, TASK_COUNT, SELECTION_SEED, TASK_IDS, EXCLUDE_TASK_IDS)
     assert RUN_LABEL and Path(RUN_LABEL).name == RUN_LABEL and RUN_LABEL not in ('.', '..')
@@ -191,6 +196,12 @@ if RUN_EVALUATION:
 """)
     server = "".join(starter["cells"][8]["source"])
     server = server.replace("gpu_memory_utilization=0.90", "gpu_memory_utilization=0.80")
+    server = server.replace("INFERENCE_API_KEY = 'EMPTY'", """if not (MODEL_PATH / 'config.json').is_file():
+    alternatives = list(Path('/kaggle/input').glob('**/gemma-4-31b-it-qat-w4a16-ct/*/config.json'))
+    if len(alternatives) != 1:
+        raise FileNotFoundError('Attach google/gemma-4/other/gemma-4-31b-it-qat-w4a16-ct/2; model config is missing or ambiguous.')
+    MODEL_PATH = alternatives[0].parent
+INFERENCE_API_KEY = 'EMPTY'""")
     server = server.replace("gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 1",
                             "gpu_count = torch.cuda.device_count()\nassert gpu_count == 4, 'Select GPU L4 x4 for the competition model'")
     evaluate = """summary, records = evaluate_variants(
@@ -198,6 +209,7 @@ if RUN_EVALUATION:
     data_dir=DATA_DIR, output_dir=RESULTS_DIR,
     task_file_sha256=selection['task_file_sha256'], seed=SELECTION_SEED,
     max_run_minutes=MAX_RUN_MINUTES, task_time_cap_minutes=TASK_TIME_CAP_MINUTES,
+    verification_timeout_seconds=VERIFICATION_TIMEOUT_SECONDS, helper_sha256=HELPER_SHA256,
 )
 import pandas as pd
 columns = ['variant', 'id', 'resolved', 'failure_category', 'test_exit_code',
@@ -208,6 +220,7 @@ print('Full artifacts:', RESULTS_DIR)
 """
     add("code", "server_instance = None\nif RUN_EVALUATION:\n    try:\n"
         + "".join("        " + line + "\n" for line in (server + "\n\n" + evaluate).splitlines())
+        + "    except Exception:\n        import traceback\n        error_path = WORKING_DIR / 'runtime-error.txt'\n        error_path.write_text(traceback.format_exc())\n        print('Full exception saved to:', error_path)\n        raise\n"
         + "    finally:\n        if server_instance is not None:\n            server_instance.stop()\n")
     add("markdown", """## Read the comparison and download the candidate
 
@@ -221,6 +234,9 @@ The time allowance only prevents starting another pair. Agent task time excludes
 setup/verification overhead; `timeout_seconds` is a **command** timeout. Plan GPU time
 accordingly. More public tasks and fresh holdout results are stronger evidence than a
 small tuned panel, but only a competition submission establishes a leaderboard score.
+Public verification uses the same 300-second test timeout for both variants, independent
+of their agent command timeouts. This is a recorded development protocol, not a claim
+about the private scorer's timeout. Automatic discovery of secret bundles is disabled.
 
 Download `/kaggle/working/submission.zip` for the **candidate agent**, then upload it via
 **Submit Prediction → File Upload**. The baseline ZIP and development records are for

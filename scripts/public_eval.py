@@ -13,7 +13,9 @@ import json
 import math
 import random
 import time
+import traceback
 from collections import Counter, defaultdict
+from dataclasses import replace
 from pathlib import Path
 
 
@@ -175,9 +177,42 @@ def write_json(path, data):
     temporary.replace(path)
 
 
+def public_evaluator_class(base):
+    """Keep the official pipeline, with equal grading time and public inputs only.
+
+    One evaluator is used sequentially. Config is restored even on exceptions;
+    this must not be used to run concurrent tasks on the same instance.
+    """
+    class PublicEvaluator(base):
+        def __init__(self, config, verification_timeout_seconds):
+            super().__init__(config)
+            self.verification_timeout_seconds = verification_timeout_seconds
+
+        def _get_secret_bundle_data(self):
+            return {}, {}, None
+
+        async def _run_agent_sandbox(self, *args, **kwargs):
+            result = await super()._run_agent_sandbox(*args, **kwargs)
+            self.config = replace(self.config, timeout_seconds=self.verification_timeout_seconds)
+            self.docker.timeout_seconds = self.verification_timeout_seconds
+            return result
+
+        async def evaluate_task(self, *args, **kwargs):
+            original_config = self.config
+            original_timeout = self.docker.timeout_seconds
+            try:
+                return await super().evaluate_task(*args, **kwargs)
+            finally:
+                self.config = original_config
+                self.docker.timeout_seconds = original_timeout
+
+    return PublicEvaluator
+
+
 def evaluate_variants(*, selected_tasks, variants, models, adapters, data_dir,
                       output_dir, task_file_sha256, seed=20261004,
-                      max_run_minutes=180, task_time_cap_minutes=None):
+                      max_run_minutes=180, task_time_cap_minutes=None,
+                      verification_timeout_seconds=300, helper_sha256=None):
     """Evaluate fresh task sandboxes with each archive's own settings.
 
     The run budget stops scheduling new pairs, not a running task or verification.
@@ -193,6 +228,10 @@ def evaluate_variants(*, selected_tasks, variants, models, adapters, data_dir,
 
     if not selected_tasks:
         raise ValueError("No selected tasks")
+    if not variants:
+        raise ValueError("No archive variants")
+    if type(verification_timeout_seconds) is not int or verification_timeout_seconds <= 0:
+        raise ValueError("verification_timeout_seconds must be a positive integer")
     for label, value in (("max_run_minutes", max_run_minutes),
                          ("task_time_cap_minutes", task_time_cap_minutes)):
         if value is not None and (not isinstance(value, (int, float)) or value <= 0
@@ -210,11 +249,13 @@ def evaluate_variants(*, selected_tasks, variants, models, adapters, data_dir,
             budgets[name]["max_time_minutes"] = min(
                 budgets[name].get("max_time_minutes", 60.0), task_time_cap_minutes)
     manifest = {
-        "protocol_version": 1, "seed": seed,
+        "protocol_version": 2, "seed": seed, "helper_sha256": helper_sha256,
         "tasks": [{"id": task.instance_id, "repo": task.repo} for task in selected_tasks],
         "task_file_sha256": task_file_sha256,
         "archives": {name: variant["sha256"] for name, variant in variants.items()},
         "effective_budgets": budgets, "task_time_cap_minutes": task_time_cap_minutes,
+        "verification_timeout_seconds": verification_timeout_seconds,
+        "secret_bundle_hydration": False,
         "packages": {name: importlib.metadata.version(name) for name in
                      ("swegemma", "adk-submission", "adk-eval-core", "google-adk", "vllm")},
         "compaction": {"compaction_interval": 5, "overlap_size": 2,
@@ -232,12 +273,23 @@ def evaluate_variants(*, selected_tasks, variants, models, adapters, data_dir,
     records_dir = output_dir / "records"
     records_dir.mkdir(exist_ok=True)
     records = []
+    expected = {(name, task.instance_id) for name in variants for task in selected_tasks}
+    seen = set()
     for path in sorted(records_dir.glob("*.json")):
-        records.append(json.loads(path.read_text()))
+        row = json.loads(path.read_text())
+        key = (row["variant"], row["id"])
+        if key not in expected or key in seen or row["archive_sha256"] != variants[key[0]]["sha256"]:
+            raise ValueError(f"Unexpected or duplicate cached task record: {path}")
+        if row.get("exception_type"):
+            raise ValueError(f"Previous run had a runtime exception in {path}; inspect its traceback "
+                             "and use a new RUN_LABEL after fixing the cause.")
+        seen.add(key)
+        records.append(row)
     done = {(row["variant"], row["id"]) for row in records}
     task_ids = [task.instance_id for task in selected_tasks]
     limits, gen_constraints = build_submission_limits()
     evaluators = {}
+    PublicEvaluator = public_evaluator_class(Evaluator)
     for name, variant in variants.items():
         config = EvalConfig(
             tasks_path=data_dir / "tasks.jsonl", snapshots_dir=data_dir / "snapshots",
@@ -249,7 +301,7 @@ def evaluate_variants(*, selected_tasks, variants, models, adapters, data_dir,
             graph_dir=str(data_dir / "graphs"), embeddings_dir=str(data_dir / "embeddings"),
             wheels_dir=data_dir / "wheels", verbose=False,
         )
-        evaluators[name] = Evaluator(config)
+        evaluators[name] = PublicEvaluator(config, verification_timeout_seconds)
     start = time.monotonic()
     for index, task in enumerate(selected_tasks, start=1):
         if max_run_minutes is not None and (time.monotonic() - start) / 60 >= max_run_minutes:
@@ -263,13 +315,16 @@ def evaluate_variants(*, selected_tasks, variants, models, adapters, data_dir,
                 continue
             print(f"[{index}/{len(selected_tasks)}] {name} {task.instance_id}", flush=True)
             task_start = time.monotonic()
+            failure = None
             try:
                 result = run_sync(evaluators[name].evaluate_task, task=task,
                                   task_index=index, total_tasks=len(selected_tasks))
                 row = result.model_dump(mode="json", exclude={"trace"})
             except Exception as error:
+                failure = error
                 row = {"resolved": False, "test_exit_code": -1, "agent_patch": "",
                        "error_message": str(error), "exception_type": type(error).__name__,
+                       "traceback": traceback.format_exc(),
                        "duration_seconds": time.monotonic() - task_start}
             row.update(id=task.instance_id, repo=task.repo, variant=name,
                        archive_sha256=variants[name]["sha256"])
@@ -282,6 +337,9 @@ def evaluate_variants(*, selected_tasks, variants, models, adapters, data_dir,
             write_json(output_dir / "development-summary.json", summary)
             print(f"  {row['failure_category']}, {row.get('tool_calls', 0)} tool calls, "
                   f"{row.get('duration_seconds', 0):.1f}s", flush=True)
+            if failure is not None:
+                raise RuntimeError(f"Evaluation stopped after a runtime exception; full traceback: "
+                                   f"{records_dir / f'{key}.json'}") from failure
     summary = summarize(records, task_ids, list(variants), seed)
     write_json(output_dir / "development-summary.json", summary)
     return summary, records
